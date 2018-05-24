@@ -1,0 +1,11 @@
+{
+	"db_type": "mssql",
+	"site_name": "ace",
+	"connection": {
+		"host": "192.168.0.152",
+		"port": 1433,
+		"user": "itfact",
+		"password": "..123456",
+		"database": "vr"
+	}
+}
