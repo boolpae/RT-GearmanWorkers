@@ -103,9 +103,9 @@ VRInotify::~VRInotify() {
  * @param[in]	threadId	ThreadId
  */
 static inline void finishJob(std::thread::id threadId, std::set<std::thread::id> *list) {
-	working_job.fetch_sub(1);
 	if (list)
 		list->erase(std::this_thread::get_id());
+	working_job.fetch_sub(1);
 }
 
 /**
@@ -197,6 +197,7 @@ __get_token(const char *id,
 	auth_body.append(config->getConfig("api.api_key", default_config.api_key.c_str()));
 	auth_body.append("\"}");
 
+	curl_easy_setopt(ctx.get(), CURLOPT_NOSIGNAL, 1); // longjmp causes uninitialized stack frame 
 	curl_easy_setopt(ctx.get(), CURLOPT_URL, uri.c_str()); // URL 설정 
 	curl_easy_setopt(ctx.get(), CURLOPT_POST, true);
 	curl_easy_setopt(ctx.get(), CURLOPT_SSL_VERIFYPEER, 0L);
@@ -267,7 +268,7 @@ int VRInotify::sendRequest(
 		const std::string &body,
 		const std::string &download_uri,
 		const char *output_path, std::set<std::thread::id> *list) {
-	std::lock_guard<std::mutex> guard(job_lock);
+	// comment by boolpae, std::lock_guard<std::mutex> guard(job_lock);
 
 	// HTTP 헤더 생성 
 	struct curl_slist *headers = NULL;
@@ -314,7 +315,7 @@ int VRInotify::sendRequest(
 	curl_easy_setopt(ctx.get(), CURLOPT_WRITEDATA, (void *) &response_text); // 바디 출력 설정 
 
 	// CURLMcode curl_multi_add_handle(CURLM *multi_handle, CURL *easy_handle); // FIXME:
-	job_lock.unlock();
+	// comment by boolpae, job_lock.unlock();
 	logger->debug("[%s] POST %s HTTP/1.1\n%s", id.c_str(), apiserver_uri, body.c_str());
 	try {
 		CURLcode response_code = curl_easy_perform(ctx.get());
@@ -330,7 +331,7 @@ int VRInotify::sendRequest(
 		return EXIT_FAILURE;
 	}
 
-	job_lock.lock();
+	// comment by boolpae, job_lock.lock();
 	long http_code = 0;
 	curl_easy_getinfo(ctx.get(), CURLINFO_RESPONSE_CODE, &http_code);
 	if (http_code == 200 || http_code == 201) {
@@ -356,7 +357,7 @@ int VRInotify::sendRequest(
 						id.c_str(), http_code);
 		token_header = "";
 		// 인증 실패의 경우 재시도 
-		job_lock.unlock();
+		// comment by boolpae, job_lock.unlock();
 		logger->info("[%s] Retry job", id.c_str());
 		return sendRequest(id, config, apiserver_uri, call_id, body, download_uri, output_path, list);
 	} else {
@@ -505,13 +506,17 @@ int VRInotify::processRequest(
  * @param[in]	increment	슬립 시간 증가값 
  */
 void VRInotify::waitForFinish(const int max_worker, const int seconds, const int increment ) {
-	int wait_time = seconds;
+	int wait_time = 0;
 	while (true) {
 		if (max_worker <= working_job.load()) {
-			logger->debug("Sleep for %ds (running: %d, Max: %d)", wait_time, working_job.load(), max_worker);
-			std::this_thread::sleep_for(std::chrono::seconds(wait_time));
-			if (wait_time < 300)
-				wait_time += increment;
+			std::string thrdId = boost::lexical_cast<std::string>(std::this_thread::get_id());
+			logger->debug("[job: %s] Sleep for %ds (running: %d, Max: %d)", thrdId.c_str(), wait_time, working_job.load(), max_worker);
+			std::this_thread::sleep_for(std::chrono::seconds(seconds));
+			wait_time += increment;
+			if (wait_time > 300)
+			{
+				logger->warn("[job: %s] wait_time exceed 300s)", thrdId.c_str());
+			}
 		} else
 			break;
 	}
@@ -650,25 +655,25 @@ int VRInotify::runJob(const std::shared_ptr<std::string> path,
 		if (index_file.is_open()) {
 			logger->info("Request STT with list '%s'", filename->c_str());
 			std::set<std::thread::id> jobs;
+			std::vector<std::thread> jobList;
+			std::vector<std::thread>::iterator iter;
 			for (std::string line; std::getline(index_file, line); ) {
 				if (line.empty() || line.size() < 5)
 					continue;
 
 				VRInotify::waitForFinish(available_workers.load(), 1, 1);
-
+#if 0	// disable code block by boolpae
 				// FIXME: 동시 처리 문제를 확인하기 위한 코드 
 				while (jobs.size() > 10000) {
 					logger->warn("Waiting for end (# of running, remain: %lu)", working_job.load(), jobs.size());
 					std::this_thread::sleep_for(std::chrono::seconds(5));
 				}
-
+#endif
 				try {
 					working_job.fetch_add(1);
-					std::thread job(VRInotify::processRequest, config, apiserver.c_str(),
+					jobList.push_back( std::thread(VRInotify::processRequest, config, apiserver.c_str(),
 									(const char *) NULL, download_path,
-									format_string, line, output_path, &jobs);
-					jobs.insert(job.get_id());
-					job.detach();
+									format_string, line, output_path, nullptr) );
 				} catch (std::exception &e) {
 					logger->warn("Job error: %s(%d) (#job: %d, running: %d)",
 								 e.what(), errno, jobs.size(), working_job.load());
@@ -676,10 +681,17 @@ int VRInotify::runJob(const std::shared_ptr<std::string> path,
 				}
 			}
 			index_file.close();
-
+#if 0
 			while (jobs.size() > 0)
 				std::this_thread::sleep_for(std::chrono::seconds(1));
+#else
+			for(iter = jobList.begin(); iter != jobList.end(); iter++) {
+				(*iter).join();
+				//delete (*iter);
+			}
 
+			jobList.clear();
+#endif
 			rc = EXIT_SUCCESS;
 			logger->info("Done: %s", filename->c_str());
 
@@ -784,6 +796,7 @@ int VRInotify::monitoring() {
 				if (filename->at(0) != '.' && file_ext.find(watch_ext) == 0 &&
 					(file_ext.size() == watch_ext.size() || file_ext.at(watch_ext.size()) == '\0' )) {
 					try {
+						VRInotify::waitForFinish(available_workers.load(), 1, 1);
 						std::thread job(VRInotify::runJob, path, filename, &config);
 						job.detach();
 					} catch (std::exception &e) {
