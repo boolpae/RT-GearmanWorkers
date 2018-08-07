@@ -35,13 +35,12 @@ namespace itfact {
 
 			private:
 				VRInotify();
-				//static void waitForFinish(const int max_worker, const int seconds, const int increment = 0);
-				static void waitForFinish(const int max_worker, const int seconds, const int increment = 0, const char* filename="none", std::set<std::thread::id> *list = NULL);
+				static void waitForFinish(const int max_worker, const int seconds, const int increment = 0, const char* filename = "NONE", std::map<std::thread::id,std::string> *list = NULL);
 				static int processRequest(
 					const itfact::common::Configuration *config,
 					const char *apiserver_uri, const char *pathname,
 					const char *download_path, const std::string &format_string,
-					const std::string data, const char *output = NULL, std::set<std::thread::id> *list = NULL);
+					const std::string data, const char *output = NULL, std::map<std::thread::id,std::string> *list = NULL);
 				static int sendRequest(
 					const std::string &id,
 					const itfact::common::Configuration *config,
@@ -49,7 +48,7 @@ namespace itfact {
 					const std::string &call_id,
 					const std::string &body,
 					const std::string &download_uri,
-					const char *output_path = NULL, std::set<std::thread::id> *list = NULL);
+					const char *output_path = NULL, std::map<std::thread::id,std::string> *list = NULL);
 			};
 		}
 	}

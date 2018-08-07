@@ -104,7 +104,7 @@ VRInotify::~VRInotify() {
  * @date		2016. 11. 04. 13:34:38
  * @param[in]	threadId	ThreadId
  */
-static inline void finishJob(std::thread::id threadId, std::set<std::thread::id> *list) {
+static inline void finishJob(std::thread::id threadId, std::map<std::thread::id,std::string> *list) {
 	std::lock_guard<std::mutex> guard(job_lock);
 	working_job.fetch_sub(1);
 	list_count.fetch_sub(1);
@@ -282,7 +282,7 @@ int VRInotify::sendRequest(
 		const std::string &call_id,
 		const std::string &body,
 		const std::string &download_uri,
-		const char *output_path, std::set<std::thread::id> *list) {
+		const char *output_path, std::map<std::thread::id,std::string> *list) {
 	std::lock_guard<std::mutex> guard(req_lock);
 
 	// HTTP 헤더 생성 
@@ -429,7 +429,7 @@ int VRInotify::processRequest(
 	const itfact::common::Configuration *config,
 	const char *apiserver_uri, const char *pathname,
 	const char *download_path, const std::string &format_string,
-	const std::string data, const char *output, std::set<std::thread::id> *list) {
+	const std::string data, const char *output, std::map<std::thread::id,std::string> *list) {
 	std::string id(COLOR_BLACK_BOLD);
 	id.append("job:");
 	id.append(boost::lexical_cast<std::string>(std::this_thread::get_id()));
@@ -542,10 +542,9 @@ void VRInotify::waitForFinish(const int max_worker, const int seconds, const int
 	}
 }
 #endif
-void VRInotify::waitForFinish(const int max_worker, const int seconds, const int increment, const char *filename, std::set<std::thread::id> *list ) {
+void VRInotify::waitForFinish(const int max_worker, const int seconds, const int increment, const char *filename, std::map<std::thread::id,std::string> *list ) {
 	int wait_time = 0;
-	std::set<std::thread::id>::iterator iter;
-
+	std::map<std::thread::id,std::string>::iterator iter;
 	while (true) {
 		if (max_worker <= working_job.load()) {
 			std::string thrdId = boost::lexical_cast<std::string>(std::this_thread::get_id());
@@ -555,7 +554,7 @@ void VRInotify::waitForFinish(const int max_worker, const int seconds, const int
 				pids.append("SubThreads[ ");
 				for(iter = list->begin(); iter != list->end(); iter++) {
 					char spid[64];
-					sprintf(spid, "%ld ", (*iter));
+					sprintf(spid, "%s ", (iter->second).c_str());
 					pids.append(spid);
 				}
 				pids.push_back(']');
@@ -706,7 +705,8 @@ int VRInotify::runJob(const std::shared_ptr<std::string> path,
 		if (index_file.is_open()) {
 			logger->info("Request STT with list '%s'", filename->c_str());
 			std::thread *job;
-			std::set<std::thread::id> jobs;
+			//std::set<std::thread::id> jobs;
+			std::map<std::thread::id,std::string> jobs;
 			std::vector<std::thread> jobList;
 			std::set<std::thread::id>::iterator iter;
 
@@ -743,7 +743,7 @@ int VRInotify::runJob(const std::shared_ptr<std::string> path,
 					job = new std::thread(VRInotify::processRequest, config, apiserver.c_str(),
 									(const char *) NULL, download_path,
 									format_string, line, output_path, &jobs);
-					jobs.insert(job->get_id());
+					jobs.insert(make_pair(job->get_id(),line));
 					job->detach();
 				} catch (std::exception &e) {
 					logger->warn("Job error: %s(%d) (#job: %d, running: %d)",
