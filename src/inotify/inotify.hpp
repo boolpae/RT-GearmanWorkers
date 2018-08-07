@@ -35,7 +35,8 @@ namespace itfact {
 
 			private:
 				VRInotify();
-				static void waitForFinish(const int max_worker, const int seconds, const int increment = 0);
+				//static void waitForFinish(const int max_worker, const int seconds, const int increment = 0);
+				static void waitForFinish(const int max_worker, const int seconds, const int increment = 0, const char* filename="none", std::set<std::thread::id> *list = NULL);
 				static int processRequest(
 					const itfact::common::Configuration *config,
 					const char *apiserver_uri, const char *pathname,

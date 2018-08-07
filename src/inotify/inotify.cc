@@ -30,9 +30,11 @@ using namespace itfact::vr::node;
 static log4cpp::Category *logger = NULL;
 static std::string token_header;
 static std::mutex job_lock;
+static std::mutex req_lock;
 static std::atomic<int> working_job(0);
 static std::atomic<int> available_workers(10);
 static std::atomic<int> running_workers(0);
+static std::atomic<int> list_count(0);
 
 static struct {
 	std::string rec_ext;
@@ -103,10 +105,23 @@ VRInotify::~VRInotify() {
  * @param[in]	threadId	ThreadId
  */
 static inline void finishJob(std::thread::id threadId, std::set<std::thread::id> *list) {
+	std::lock_guard<std::mutex> guard(job_lock);
+	working_job.fetch_sub(1);
+	list_count.fetch_sub(1);
 	if (list)
 		list->erase(std::this_thread::get_id());
-	working_job.fetch_sub(1);
 }
+
+static inline void addListCount(int cnt) {
+	std::lock_guard<std::mutex> guard(job_lock);
+	list_count.fetch_add(cnt);
+}
+#if 0
+static inline void subListCount() {
+	std::lock_guard<std::mutex> guard(list_lock);
+	list_count.fetch_sub(1);
+}
+#endif
 
 /**
  * @brief		데이터 다운로드 
@@ -268,7 +283,7 @@ int VRInotify::sendRequest(
 		const std::string &body,
 		const std::string &download_uri,
 		const char *output_path, std::set<std::thread::id> *list) {
-	// comment by boolpae, std::lock_guard<std::mutex> guard(job_lock);
+	std::lock_guard<std::mutex> guard(req_lock);
 
 	// HTTP 헤더 생성 
 	struct curl_slist *headers = NULL;
@@ -315,7 +330,7 @@ int VRInotify::sendRequest(
 	curl_easy_setopt(ctx.get(), CURLOPT_WRITEDATA, (void *) &response_text); // 바디 출력 설정 
 
 	// CURLMcode curl_multi_add_handle(CURLM *multi_handle, CURL *easy_handle); // FIXME:
-	// comment by boolpae, job_lock.unlock();
+	req_lock.unlock();
 	logger->debug("[%s] POST %s HTTP/1.1\n%s", id.c_str(), apiserver_uri, body.c_str());
 	try {
 		CURLcode response_code = curl_easy_perform(ctx.get());
@@ -331,7 +346,7 @@ int VRInotify::sendRequest(
 		return EXIT_FAILURE;
 	}
 
-	// comment by boolpae, job_lock.lock();
+	req_lock.lock();
 	long http_code = 0;
 	curl_easy_getinfo(ctx.get(), CURLINFO_RESPONSE_CODE, &http_code);
 	if (http_code == 200 || http_code == 201) {
@@ -357,7 +372,7 @@ int VRInotify::sendRequest(
 						id.c_str(), http_code);
 		token_header = "";
 		// 인증 실패의 경우 재시도 
-		// comment by boolpae, job_lock.unlock();
+		req_lock.unlock();
 		logger->info("[%s] Retry job", id.c_str());
 		return sendRequest(id, config, apiserver_uri, call_id, body, download_uri, output_path, list);
 	} else {
@@ -418,7 +433,11 @@ int VRInotify::processRequest(
 	std::string id(COLOR_BLACK_BOLD);
 	id.append("job:");
 	id.append(boost::lexical_cast<std::string>(std::this_thread::get_id()));
+	id.push_back(' ');
+	id.append(data.c_str());
 	id.append(COLOR_NC);
+
+	//working_job.fetch_add(1);
 
 	if (pathname)
 		logger->info("[%s] Request STT: %s", id.c_str(), pathname);
@@ -505,6 +524,7 @@ int VRInotify::processRequest(
  * @param[in]	seconds		슬립 시간 
  * @param[in]	increment	슬립 시간 증가값 
  */
+#if 0
 void VRInotify::waitForFinish(const int max_worker, const int seconds, const int increment ) {
 	int wait_time = 0;
 	while (true) {
@@ -516,6 +536,37 @@ void VRInotify::waitForFinish(const int max_worker, const int seconds, const int
 			if (wait_time > 300)
 			{
 				logger->warn("[job: %s] wait_time exceed 300s)", thrdId.c_str());
+			}
+		} else
+			break;
+	}
+}
+#endif
+void VRInotify::waitForFinish(const int max_worker, const int seconds, const int increment, const char *filename, std::set<std::thread::id> *list ) {
+	int wait_time = 0;
+	std::set<std::thread::id>::iterator iter;
+
+	while (true) {
+		if (max_worker <= working_job.load()) {
+			std::string thrdId = boost::lexical_cast<std::string>(std::this_thread::get_id());
+			std::string pids;
+
+			if (list && list->size()) {
+				pids.append("SubThreads[ ");
+				for(iter = list->begin(); iter != list->end(); iter++) {
+					char spid[64];
+					sprintf(spid, "%ld ", (*iter));
+					pids.append(spid);
+				}
+				pids.push_back(']');
+				//logger->debug("%s", pids.c_str());
+				logger->debug("[job: %s] Sleep for %ds (running: %d, Max: %d, Filename: %s) %s", thrdId.c_str(), wait_time, working_job.load(), max_worker, filename, pids.c_str());
+			}
+			std::this_thread::sleep_for(std::chrono::seconds(seconds));
+			wait_time += increment;
+			if (wait_time > 300)
+			{
+				logger->warn("[job: %s] wait_time exceed 300s, File: %s)", thrdId.c_str(), filename);
 			}
 		} else
 			break;
@@ -654,14 +705,26 @@ int VRInotify::runJob(const std::shared_ptr<std::string> path,
 		std::ifstream index_file(pathname);
 		if (index_file.is_open()) {
 			logger->info("Request STT with list '%s'", filename->c_str());
+			std::thread *job;
 			std::set<std::thread::id> jobs;
 			std::vector<std::thread> jobList;
-			std::vector<std::thread>::iterator iter;
+			std::set<std::thread::id>::iterator iter;
+
+			int listCount=0;
+			for(std::string line; std::getline(index_file, line); ) {
+				if (line.empty() || line.size() < 5 )
+					continue;
+				listCount++;
+			}
+			addListCount(listCount);
+			index_file.clear();
+			index_file.seekg(0);
+
 			for (std::string line; std::getline(index_file, line); ) {
 				if (line.empty() || line.size() < 5)
 					continue;
 
-				VRInotify::waitForFinish(available_workers.load(), 1, 1);
+				VRInotify::waitForFinish(available_workers.load(), 1, 1, line.c_str(), &jobs);
 #if 0	// disable code block by boolpae
 				// FIXME: 동시 처리 문제를 확인하기 위한 코드 
 				while (jobs.size() > 10000) {
@@ -670,10 +733,18 @@ int VRInotify::runJob(const std::shared_ptr<std::string> path,
 				}
 #endif
 				try {
+					std::lock_guard<std::mutex> guard(job_lock);
 					working_job.fetch_add(1);
+					/*
 					jobList.push_back( std::thread(VRInotify::processRequest, config, apiserver.c_str(),
 									(const char *) NULL, download_path,
 									format_string, line, output_path, nullptr) );
+					*/
+					job = new std::thread(VRInotify::processRequest, config, apiserver.c_str(),
+									(const char *) NULL, download_path,
+									format_string, line, output_path, &jobs);
+					jobs.insert(job->get_id());
+					job->detach();
 				} catch (std::exception &e) {
 					logger->warn("Job error: %s(%d) (#job: %d, running: %d)",
 								 e.what(), errno, jobs.size(), working_job.load());
@@ -681,9 +752,24 @@ int VRInotify::runJob(const std::shared_ptr<std::string> path,
 				}
 			}
 			index_file.close();
-#if 0
-			while (jobs.size() > 0)
+#if 1
+			while (jobs.size() > 0) {
+				#if 0
+				std::string pids;
+
+				pids.append("Running Threads[");
+				pids.append(boost::lexical_cast<std::string>(std::this_thread::get_id()));
+				pids.append("] - SubThreads[ ");
+				for(iter = jobs.begin(); iter != jobs.end(); iter++) {
+					char spid[64];
+					sprintf(spid, "%ld ", (*iter));
+					pids.append(spid);
+				}
+				pids.push_back(']');
+				logger->debug("%s", pids.c_str());
+				#endif
 				std::this_thread::sleep_for(std::chrono::seconds(1));
+			}
 #else
 			for(iter = jobList.begin(); iter != jobList.end(); iter++) {
 				(*iter).join();
@@ -714,6 +800,11 @@ int VRInotify::runJob(const std::shared_ptr<std::string> path,
 		cmd.append(pathname);
 		cmd.push_back(' ');
 		cmd.append(output_pathname);
+		// for KT-DS
+		cmd.push_back(' ');
+		cmd.append(path->c_str());
+		cmd.push_back('/');
+		cmd.append(filename->c_str());
 
 		logger->debug(cmd.c_str());
 		rc = std::system(cmd.c_str());
@@ -796,15 +887,20 @@ int VRInotify::monitoring() {
 				if (filename->at(0) != '.' && file_ext.find(watch_ext) == 0 &&
 					(file_ext.size() == watch_ext.size() || file_ext.at(watch_ext.size()) == '\0' )) {
 					try {
-						VRInotify::waitForFinish(available_workers.load(), 1, 1);
+						//VRInotify::waitForFinish(available_workers.load(), 1, 1);
+						while(available_workers.load() < list_count.load()) {
+							logger->debug("List Count(%d)", list_count.load());
+							std::this_thread::sleep_for(std::chrono::seconds(1));
+						}
 						std::thread job(VRInotify::runJob, path, filename, &config);
 						job.detach();
+						std::this_thread::sleep_for(std::chrono::seconds(1));
 					} catch (std::exception &e) {
 						logger->warn("%s: %s", e.what(), filename->c_str());
 					}
 				} else {
-					logger->debug("Ignore %s (Watch: '%s', ext: '%s')", filename->c_str(),
-									watch_ext.c_str(), file_ext.c_str());
+					logger->debug("Ignore %s (Watch: '%s', ext: '%s') ListCount(%d)", filename->c_str(),
+									watch_ext.c_str(), file_ext.c_str(), list_count.load());
 				}
 			}
 		}
