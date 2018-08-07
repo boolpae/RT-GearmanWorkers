@@ -553,7 +553,7 @@ void VRInotify::waitForFinish(const int max_worker, const int seconds, const int
 			if (list && list->size()) {
 				pids.append("SubThreads[ ");
 				for(iter = list->begin(); iter != list->end(); iter++) {
-					char spid[64];
+					char spid[128];
 					sprintf(spid, "%s ", (iter->second).c_str());
 					pids.append(spid);
 				}
